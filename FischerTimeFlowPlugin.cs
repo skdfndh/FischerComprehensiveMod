@@ -10,7 +10,7 @@ using UnityEngine;
 
 namespace FischerTimeFlow;
 
-[BepInPlugin("local.codex.fischer-time-flow", "Fischer 综合 Mod", "1.0.20")]
+[BepInPlugin("local.codex.fischer-time-flow", "Fischer 综合 Mod", "1.0.21")]
 public sealed class FischerTimeFlowPlugin : BaseUnityPlugin
 {
     private static readonly float[] Multipliers = { 1f, 2f, 4f, 8f };
@@ -33,8 +33,10 @@ public sealed class FischerTimeFlowPlugin : BaseUnityPlugin
     private long observedShopRefreshTime = long.MinValue;
     private float shopRefreshRemainingSeconds = -1f;
     private float nextAutoBaitUseTime;
+    private float nextAidRequestTime;
     private bool basketBaselineReady;
     private bool fullBasketHandled;
+    private bool aidRequestPending;
     private Harmony harmony = null!;
 
     private void Awake()
@@ -296,28 +298,39 @@ public sealed class FischerTimeFlowPlugin : BaseUnityPlugin
     {
         if (!autoCompleteMiniGame.Value)
         {
+            aidRequestPending = false;
             return;
         }
 
         MiniGame miniGame = UnityEngine.Object.FindObjectOfType<MiniGame>();
         if (miniGame != null)
         {
+            aidRequestPending = false;
             CompleteMiniGame();
             return;
         }
 
-        if (Main.model == null || Main.popMgr.IsHaveOpenPopup())
+        if (Main.model == null)
         {
             return;
         }
 
         MapInfo mapInfo = Main.model.mapModel.curMapInfo;
-        BtnAid aidButton = UnityEngine.Object.FindObjectOfType<BtnAid>();
-        if (aidButton != null && aidButton.gameObject.activeInHierarchy && mapInfo.minigameShow && mapInfo.minigameRemainTime > 0)
+        if (!mapInfo.minigameShow || mapInfo.minigameRemainTime <= 0)
         {
-            Main.evtMgr.Send(Framework.EventType.OnAid);
-            Logger.LogInfo("检测到鱼群聚集感叹号，已自动进入小游戏。");
+            aidRequestPending = false;
+            return;
         }
+
+        if (aidRequestPending && Time.unscaledTime < nextAidRequestTime)
+        {
+            return;
+        }
+
+        aidRequestPending = true;
+        nextAidRequestTime = Time.unscaledTime + 1f;
+        Main.evtMgr.Send(Framework.EventType.OnAid);
+        Logger.LogInfo("检测到鱼群聚集感叹号，已自动进入小游戏。");
     }
 
     private void CompleteNpcTasksIfEnabled()
