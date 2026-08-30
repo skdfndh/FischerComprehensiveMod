@@ -10,7 +10,7 @@ using UnityEngine;
 
 namespace FischerTimeFlow;
 
-[BepInPlugin("local.codex.fischer-time-flow", "Fischer 时间流速", "1.0.15")]
+[BepInPlugin("local.codex.fischer-time-flow", "Fischer 综合 Mod", "1.0.16")]
 public sealed class FischerTimeFlowPlugin : BaseUnityPlugin
 {
     private static readonly float[] Multipliers = { 1f, 2f, 4f, 8f };
@@ -25,6 +25,7 @@ public sealed class FischerTimeFlowPlugin : BaseUnityPlugin
     private ConfigEntry<KeyboardShortcut> cycleHotkey = null!;
     private ConfigEntry<bool> autoWakeCat = null!;
     private ConfigEntry<bool> autoSprinkleBait = null!;
+    private ConfigEntry<bool> autoCompleteMiniGame = null!;
     private ConfigEntry<bool> autoCompleteNpcTasks = null!;
     private readonly HashSet<FishInfo> knownBasketFish = new HashSet<FishInfo>();
     private readonly HashSet<NpcInfo> automaticDialogNpcs = new HashSet<NpcInfo>();
@@ -44,12 +45,14 @@ public sealed class FischerTimeFlowPlugin : BaseUnityPlugin
             "开启后，小猫开始偷懒时立即自动唤醒。可在左上角面板中切换。");
         autoSprinkleBait = Config.Bind("设置", "自动投放窝料", false,
             "开启后，当前窝料效果结束时自动投放一层。优先消耗手动购买的窝料，再使用按原游戏规则恢复的免费窝料。");
+        autoCompleteMiniGame = Config.Bind("设置", "自动完成鱼群聚集", false,
+            "开启后，检测到鱼群聚集小游戏时自动完成。可在左上角面板中切换。");
         autoCompleteNpcTasks = Config.Bind("设置", "自动完成伙伴任务", false,
             "开启后，自动识别当前地图中出现的伙伴任务，并在材料齐全时自动提交。");
         multiplierIndex.Value = Mathf.Clamp(multiplierIndex.Value, 0, Multipliers.Length - 1);
         harmony = new Harmony("local.codex.fischer-time-flow");
         harmony.PatchAll(typeof(FischerTimeFlowPlugin).Assembly);
-        Logger.LogInfo("Fischer 时间流速已加载。按 F6 切换 1倍、2倍、4倍、8倍。");
+        Logger.LogInfo("Fischer 综合 Mod 已加载。按 F6 切换 1倍、2倍、4倍、8倍。");
     }
 
     private void Update()
@@ -84,10 +87,7 @@ public sealed class FischerTimeFlowPlugin : BaseUnityPlugin
             OrganizeMagicTank();
         }
 
-        if (GUI.Button(new Rect(35f, 198f, 190f, 25f), "Finish fish group"))
-        {
-            CompleteMiniGame();
-        }
+        autoCompleteMiniGame.Value = GUI.Toggle(new Rect(35f, 198f, 190f, 25f), autoCompleteMiniGame.Value, "Auto finish fish group");
 
         autoCompleteNpcTasks.Value = GUI.Toggle(new Rect(35f, 228f, 190f, 25f), autoCompleteNpcTasks.Value, "Auto complete NPC tasks");
 
@@ -110,6 +110,7 @@ public sealed class FischerTimeFlowPlugin : BaseUnityPlugin
         SyncAutoPurchase();
         WakeCatIfEnabled();
         SprinkleBaitIfEnabled();
+        CompleteMiniGameIfEnabled();
         CompleteNpcTasksIfEnabled();
         ProcessNewBasketFish();
     }
@@ -263,7 +264,6 @@ public sealed class FischerTimeFlowPlugin : BaseUnityPlugin
         Game game = UnityEngine.Object.FindObjectOfType<Game>();
         if (miniGame == null || game == null)
         {
-            Logger.LogInfo("鱼群聚集小游戏尚未打开。");
             return;
         }
 
@@ -276,6 +276,14 @@ public sealed class FischerTimeFlowPlugin : BaseUnityPlugin
         Main.evtMgr.Send(Framework.EventType.OnAidFinish, new object[1] { new List<Fg_fish>(fishList) });
         miniGame.OnClickClose();
         Logger.LogInfo("已自动完成鱼群聚集小游戏。");
+    }
+
+    private void CompleteMiniGameIfEnabled()
+    {
+        if (autoCompleteMiniGame.Value)
+        {
+            CompleteMiniGame();
+        }
     }
 
     private void CompleteNpcTasksIfEnabled()

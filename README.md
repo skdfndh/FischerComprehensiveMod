@@ -1,4 +1,4 @@
-# Fischer 时间流速
+# Fischer 综合 Mod
 
 《Fischer's Fishing Journey》的 BepInEx 插件：提供时间倍率、自动投放窝料、自动伙伴交互、神奇鱼缸整理等功能。
 
