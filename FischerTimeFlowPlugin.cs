@@ -10,7 +10,7 @@ using UnityEngine;
 
 namespace FischerTimeFlow;
 
-[BepInPlugin("local.codex.fischer-time-flow", "Fischer 综合 Mod", "1.0.17")]
+[BepInPlugin("local.codex.fischer-time-flow", "Fischer 综合 Mod", "1.0.18")]
 public sealed class FischerTimeFlowPlugin : BaseUnityPlugin
 {
     private static readonly float[] Multipliers = { 1f, 2f, 4f, 8f };
@@ -670,42 +670,10 @@ public sealed class FischerTimeFlowPlugin : BaseUnityPlugin
         magicTank.Remove(lowestIncomeFish);
         magicTank.Add(caughtFish);
         Main.evtMgr.Send(Framework.EventType.OnRemoveFishInTank, new object[2] { lowestIncomeFish, 0 });
-        MoveDisplacedFish(lowestIncomeFish, Main.model.backPackModel.fishBasket, tankCapacity);
+        Main.model.backPackModel.fishBasket.Add(lowestIncomeFish);
         NotifyFishTankChanged(caughtFish, 0);
         Logger.LogInfo("已用收益更高的新鱼替换神奇鱼缸中的最低收益鱼。");
         return true;
-    }
-
-    private static void MoveDisplacedFish(FishInfo displacedFish, List<FishInfo> fishBasket, int tankCapacity)
-    {
-        if (displacedFish.fishCfg.rare >= 5)
-        {
-            List<FishTankInfo> normalTanks = Main.model.backPackModel.appreciateTanks;
-            FishTankInfo? targetTank = null;
-            int targetIndex = -1;
-            for (int i = 0; i < normalTanks.Count; i++)
-            {
-                if (i == 1 || normalTanks[i].fishInfos.Count >= tankCapacity)
-                {
-                    continue;
-                }
-
-                if (targetTank == null || normalTanks[i].fishInfos.Count < targetTank.fishInfos.Count)
-                {
-                    targetTank = normalTanks[i];
-                    targetIndex = i;
-                }
-            }
-
-            if (targetTank != null)
-            {
-                targetTank.fishInfos.Add(displacedFish);
-                Main.evtMgr.Send(Framework.EventType.OnPutFishIntoTank, new object[2] { displacedFish, targetIndex + 1 });
-                return;
-            }
-        }
-
-        fishBasket.Add(displacedFish);
     }
 
     private static void NotifyFishTankChanged(FishInfo fishInfo, int tankIndex)
