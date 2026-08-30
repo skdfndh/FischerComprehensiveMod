@@ -10,7 +10,7 @@ using UnityEngine;
 
 namespace FischerTimeFlow;
 
-[BepInPlugin("local.codex.fischer-time-flow", "Fischer 综合 Mod", "1.0.18")]
+[BepInPlugin("local.codex.fischer-time-flow", "Fischer 综合 Mod", "1.0.19")]
 public sealed class FischerTimeFlowPlugin : BaseUnityPlugin
 {
     private static readonly float[] Multipliers = { 1f, 2f, 4f, 8f };
@@ -27,11 +27,13 @@ public sealed class FischerTimeFlowPlugin : BaseUnityPlugin
     private ConfigEntry<bool> autoSprinkleBait = null!;
     private ConfigEntry<bool> autoCompleteMiniGame = null!;
     private ConfigEntry<bool> autoCompleteNpcTasks = null!;
+    private ConfigEntry<bool> autoSellFullBasket = null!;
     private readonly HashSet<FishInfo> knownBasketFish = new HashSet<FishInfo>();
     private readonly HashSet<NpcInfo> automaticDialogNpcs = new HashSet<NpcInfo>();
     private long observedShopRefreshTime = long.MinValue;
     private float shopRefreshRemainingSeconds = -1f;
     private bool basketBaselineReady;
+    private bool fullBasketHandled;
     private Harmony harmony = null!;
 
     private void Awake()
@@ -49,6 +51,8 @@ public sealed class FischerTimeFlowPlugin : BaseUnityPlugin
             "开启后，检测到鱼群聚集小游戏时自动完成。可在左上角面板中切换。");
         autoCompleteNpcTasks = Config.Bind("设置", "自动完成伙伴任务", false,
             "开启后，自动识别当前地图中出现的伙伴任务，并在材料齐全时自动提交。");
+        autoSellFullBasket = Config.Bind("设置", "鱼篓满时自动出售", false,
+            "开启后，鱼篓装满时自动按全选规则出售一次。锁定鱼、任务鱼、伙伴任务所需鱼与自动出售设置中保留的鱼不会出售。");
         multiplierIndex.Value = Mathf.Clamp(multiplierIndex.Value, 0, Multipliers.Length - 1);
         harmony = new Harmony("local.codex.fischer-time-flow");
         harmony.PatchAll(typeof(FischerTimeFlowPlugin).Assembly);
@@ -71,7 +75,7 @@ public sealed class FischerTimeFlowPlugin : BaseUnityPlugin
     private void OnGUI()
     {
         bool canWakeCat = Game.curFishingState == FishingState.SlackingOff;
-        float panelHeight = canWakeCat ? 270f : 240f;
+        float panelHeight = canWakeCat ? 300f : 270f;
         GUI.Box(new Rect(20f, 20f, 220f, panelHeight), "Time Flow");
         GUI.Label(new Rect(35f, 50f, 190f, 25f), "Current: " + CurrentMultiplier + "x");
 
@@ -90,8 +94,9 @@ public sealed class FischerTimeFlowPlugin : BaseUnityPlugin
         autoCompleteMiniGame.Value = GUI.Toggle(new Rect(35f, 198f, 190f, 25f), autoCompleteMiniGame.Value, "Auto finish fish group");
 
         autoCompleteNpcTasks.Value = GUI.Toggle(new Rect(35f, 228f, 190f, 25f), autoCompleteNpcTasks.Value, "Auto complete NPC tasks");
+        autoSellFullBasket.Value = GUI.Toggle(new Rect(35f, 258f, 190f, 25f), autoSellFullBasket.Value, "Auto sell full basket");
 
-        if (canWakeCat && GUI.Button(new Rect(35f, 258f, 190f, 25f), "Wake cat"))
+        if (canWakeCat && GUI.Button(new Rect(35f, 288f, 190f, 25f), "Wake cat"))
         {
             Game.startled = true;
         }
@@ -113,6 +118,7 @@ public sealed class FischerTimeFlowPlugin : BaseUnityPlugin
         CompleteMiniGameIfEnabled();
         CompleteNpcTasksIfEnabled();
         ProcessNewBasketFish();
+        SellFullBasketIfEnabled();
     }
 
     private void CycleMultiplier()
@@ -315,6 +321,53 @@ public sealed class FischerTimeFlowPlugin : BaseUnityPlugin
 
         CompleteNpcDialogs();
         CompleteNpcTasks();
+    }
+
+    private void SellFullBasketIfEnabled()
+    {
+        if (!autoSellFullBasket.Value || Main.model == null)
+        {
+            return;
+        }
+
+        List<FishInfo> fishBasket = Main.model.backPackModel.fishBasket;
+        if (fishBasket.Count < Main.model.playerModel.basketCapacity)
+        {
+            fullBasketHandled = false;
+            return;
+        }
+
+        if (fullBasketHandled)
+        {
+            return;
+        }
+
+        fullBasketHandled = true;
+        int saleAmount = 0;
+        int soldCount = 0;
+        Framework.AutoSellingSetting setting = Main.model.backPackModel.autoSellingSetting;
+        for (int i = fishBasket.Count - 1; i >= 0; i--)
+        {
+            FishInfo fishInfo = fishBasket[i];
+            if (fishInfo.isLocked || fishInfo.isTaskItem || IsFishReservedForNpcTask(fishInfo) || (setting.applyingToSelectAll && setting.ShouldRetain(fishInfo)))
+            {
+                continue;
+            }
+
+            saleAmount += fishInfo.price;
+            fishBasket.RemoveAt(i);
+            soldCount++;
+        }
+
+        if (soldCount == 0)
+        {
+            Logger.LogInfo("鱼篓已满，但所有鱼均被保留规则保护，未出售。");
+            return;
+        }
+
+        Main.model.backPackModel.AddCoin(saleAmount);
+        Main.evtMgr.Send(Framework.EventType.OnFishCountChange);
+        Logger.LogInfo("鱼篓已满，已自动全选出售 " + soldCount + " 条鱼，获得 " + saleAmount + " 鱼币。");
     }
 
     private void CompleteNpcDialogs()
