@@ -48,7 +48,7 @@ Loading [Fischer 综合 Mod]
 | `Auto wake cat` | 自动唤醒正在偷懒的小猫。 |
 | `Auto sprinkle bait` | 在窝料效果结束后自动投放一层。不会自动购买窝料。 |
 | `Organize magic tank` | 立即整理一次神奇鱼缸。 |
-| `Auto finish fish group` | 检测到鱼群聚集小游戏时自动完成。 |
+| `Auto finish fish group` | 小猫头上出现鱼群聚集感叹号时自动进入并完成小游戏。 |
 | `Auto complete NPC tasks` | 自动完成伙伴普通对话、接取任务，并在鱼篓材料满足后提交。 |
 | `Wake cat` | 仅在小猫偷懒时显示，用于手动唤醒。 |
 

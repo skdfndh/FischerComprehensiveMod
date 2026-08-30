@@ -10,7 +10,7 @@ using UnityEngine;
 
 namespace FischerTimeFlow;
 
-[BepInPlugin("local.codex.fischer-time-flow", "Fischer 综合 Mod", "1.0.16")]
+[BepInPlugin("local.codex.fischer-time-flow", "Fischer 综合 Mod", "1.0.17")]
 public sealed class FischerTimeFlowPlugin : BaseUnityPlugin
 {
     private static readonly float[] Multipliers = { 1f, 2f, 4f, 8f };
@@ -280,9 +280,29 @@ public sealed class FischerTimeFlowPlugin : BaseUnityPlugin
 
     private void CompleteMiniGameIfEnabled()
     {
-        if (autoCompleteMiniGame.Value)
+        if (!autoCompleteMiniGame.Value)
+        {
+            return;
+        }
+
+        MiniGame miniGame = UnityEngine.Object.FindObjectOfType<MiniGame>();
+        if (miniGame != null)
         {
             CompleteMiniGame();
+            return;
+        }
+
+        if (Main.model == null || Main.popMgr.IsHaveOpenPopup())
+        {
+            return;
+        }
+
+        MapInfo mapInfo = Main.model.mapModel.curMapInfo;
+        BtnAid aidButton = UnityEngine.Object.FindObjectOfType<BtnAid>();
+        if (aidButton != null && aidButton.gameObject.activeInHierarchy && mapInfo.minigameShow && mapInfo.minigameRemainTime > 0)
+        {
+            Main.evtMgr.Send(Framework.EventType.OnAid);
+            Logger.LogInfo("检测到鱼群聚集感叹号，已自动进入小游戏。");
         }
     }
 
