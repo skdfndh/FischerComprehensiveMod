@@ -1,10 +1,11 @@
 param(
+    [Parameter(Mandatory = $true)]
+    [string]$GameDir,
     [switch]$StartGame
 )
 
 $ErrorActionPreference = 'Stop'
 $projectDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$gameDir = "D:\SteamLibrary\steamapps\common\Fischer's Fishing Journey"
 $projectFile = Join-Path $projectDir 'FischerTimeFlow.csproj'
 $sourceDll = Join-Path $projectDir 'bin\Release\net472\FischerTimeFlow.dll'
 $destinationDll = Join-Path $gameDir 'BepInEx\plugins\FischerTimeFlow.dll'
@@ -15,7 +16,7 @@ if ($null -ne $gameProcess) {
     throw 'The game is still running. Close it before deployment.'
 }
 
-dotnet build $projectFile --configuration Release
+dotnet build $projectFile --configuration Release "-p:GameDir=$GameDir"
 Copy-Item -LiteralPath $sourceDll -Destination $destinationDll -Force
 
 $sourceHash = (Get-FileHash -LiteralPath $sourceDll -Algorithm SHA256).Hash
@@ -29,4 +30,3 @@ Write-Output "[OK] Deployed FischerTimeFlow.dll: $destinationHash"
 if ($StartGame) {
     Start-Process -FilePath $gameExe
 }
-
