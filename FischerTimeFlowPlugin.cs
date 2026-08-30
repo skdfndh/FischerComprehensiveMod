@@ -10,7 +10,7 @@ using UnityEngine;
 
 namespace FischerTimeFlow;
 
-[BepInPlugin("local.codex.fischer-time-flow", "Fischer 综合 Mod", "1.0.19")]
+[BepInPlugin("local.codex.fischer-time-flow", "Fischer 综合 Mod", "1.0.20")]
 public sealed class FischerTimeFlowPlugin : BaseUnityPlugin
 {
     private static readonly float[] Multipliers = { 1f, 2f, 4f, 8f };
@@ -32,6 +32,7 @@ public sealed class FischerTimeFlowPlugin : BaseUnityPlugin
     private readonly HashSet<NpcInfo> automaticDialogNpcs = new HashSet<NpcInfo>();
     private long observedShopRefreshTime = long.MinValue;
     private float shopRefreshRemainingSeconds = -1f;
+    private float nextAutoBaitUseTime;
     private bool basketBaselineReady;
     private bool fullBasketHandled;
     private Harmony harmony = null!;
@@ -46,7 +47,7 @@ public sealed class FischerTimeFlowPlugin : BaseUnityPlugin
         autoWakeCat = Config.Bind("设置", "自动唤醒小猫", false,
             "开启后，小猫开始偷懒时立即自动唤醒。可在左上角面板中切换。");
         autoSprinkleBait = Config.Bind("设置", "自动投放窝料", false,
-            "开启后，当前窝料效果结束时自动投放一层。优先消耗手动购买的窝料，再使用按原游戏规则恢复的免费窝料。");
+            "开启后，连续投放现有窝料并叠加持续时间。优先消耗手动购买的窝料，再使用按原游戏规则恢复的免费窝料。");
         autoCompleteMiniGame = Config.Bind("设置", "自动完成鱼群聚集", false,
             "开启后，检测到鱼群聚集小游戏时自动完成。可在左上角面板中切换。");
         autoCompleteNpcTasks = Config.Bind("设置", "自动完成伙伴任务", false,
@@ -235,14 +236,20 @@ public sealed class FischerTimeFlowPlugin : BaseUnityPlugin
 
     private void SprinkleBaitIfEnabled()
     {
-        if (!autoSprinkleBait.Value || Main.model == null || Main.model.mapModel.curMapInfo.sprinkleBaitRemainTime > 0f)
+        if (!autoSprinkleBait.Value || Main.model == null)
         {
+            nextAutoBaitUseTime = 0f;
             return;
         }
 
         int purchasedBait = Main.model.mapModel.curMapInfo.regionalSprinkleBait;
         int freeBait = Main.model.playerModel.curRemainSprinkleBateNum;
         if (purchasedBait <= 0 && freeBait <= 0)
+        {
+            return;
+        }
+
+        if (Time.unscaledTime < nextAutoBaitUseTime)
         {
             return;
         }
@@ -255,8 +262,9 @@ public sealed class FischerTimeFlowPlugin : BaseUnityPlugin
 
         try
         {
+            nextAutoBaitUseTime = Time.unscaledTime + 0.25f;
             StartSprinkMethod.Invoke(spot, null);
-            Logger.LogInfo("已自动投放一层窝料。");
+            Logger.LogInfo("已自动投放一层窝料，持续时间已叠加。");
         }
         catch (TargetInvocationException exception)
         {
