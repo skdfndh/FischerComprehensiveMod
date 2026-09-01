@@ -1,0 +1,924 @@
+using System;
+using System.Collections.Generic;
+using System.Reflection;
+using BepInEx;
+using BepInEx.Configuration;
+using Framework;
+using HarmonyLib;
+using ProjectCode;
+using UnityEngine;
+
+namespace FischerTimeFlow;
+
+[BepInPlugin("local.codex.fischer-time-flow", "Fischer 综合 Mod", "1.0.24")]
+public sealed class FischerTimeFlowPlugin : BaseUnityPlugin
+{
+    private static readonly float[] Multipliers = { 1f, 2f, 4f, 8f };
+    private const long CatGoalTarget = 100000000L;
+    private static readonly Color PanelBorderColor = new Color(0.35f, 0.22f, 0.17f, 0.98f);
+    private static readonly Color PanelPaperColor = new Color(0.96f, 0.89f, 0.73f, 0.98f);
+    private static readonly Color HeaderColor = new Color(0.70f, 0.36f, 0.22f, 1f);
+    private static readonly Color AccentColor = new Color(0.36f, 0.55f, 0.43f, 1f);
+    private static readonly Color GoldColor = new Color(0.83f, 0.57f, 0.25f, 1f);
+    private static readonly Color DisabledColor = new Color(0.48f, 0.31f, 0.23f, 1f);
+    private static readonly Color RowColor = new Color(0.99f, 0.94f, 0.82f, 0.82f);
+    private static readonly Color RowBorderColor = new Color(0.78f, 0.57f, 0.39f, 0.66f);
+    private static readonly FieldInfo? SpotAnimatorField = typeof(Game).GetField("spotAnim", BindingFlags.Instance | BindingFlags.NonPublic);
+    private static readonly FieldInfo? MiniGameFishListField = typeof(Game).GetField("fishList", BindingFlags.Instance | BindingFlags.NonPublic);
+    private static readonly MethodInfo? StartSprinkMethod = typeof(Spot).GetMethod("StartSprink", BindingFlags.Instance | BindingFlags.NonPublic);
+    private static readonly FieldInfo? DialogBoxNpcInfoField = typeof(DialogBox).GetField("npcInfo", BindingFlags.Instance | BindingFlags.NonPublic);
+    private static readonly MethodInfo? NextDialogMethod = typeof(DialogBox).GetMethod("OnClickNextDialog", BindingFlags.Instance | BindingFlags.NonPublic);
+    private static FischerTimeFlowPlugin? instance;
+
+    private ConfigEntry<int> multiplierIndex = null!;
+    private ConfigEntry<KeyboardShortcut> cycleHotkey = null!;
+    private ConfigEntry<bool> autoWakeCat = null!;
+    private ConfigEntry<bool> autoSprinkleBait = null!;
+    private ConfigEntry<bool> autoCompleteMiniGame = null!;
+    private ConfigEntry<bool> autoCompleteNpcTasks = null!;
+    private ConfigEntry<bool> autoSellFullBasket = null!;
+    private readonly HashSet<FishInfo> knownBasketFish = new HashSet<FishInfo>();
+    private readonly HashSet<NpcInfo> automaticDialogNpcs = new HashSet<NpcInfo>();
+    private long observedShopRefreshTime = long.MinValue;
+    private float shopRefreshRemainingSeconds = -1f;
+    private float nextAutoBaitUseTime;
+    private float nextAidRequestTime;
+    private bool basketBaselineReady;
+    private bool fullBasketHandled;
+    private bool aidRequestPending;
+    private bool panelHidden;
+    private GUIStyle panelTitleStyle = null!;
+    private GUIStyle panelLabelStyle = null!;
+    private GUIStyle panelSmallLabelStyle = null!;
+    private GUIStyle panelCenteredLabelStyle = null!;
+    private GUIStyle panelButtonLabelStyle = null!;
+    private Harmony harmony = null!;
+
+    private void Awake()
+    {
+        instance = this;
+        multiplierIndex = Config.Bind("设置", "倍率序号", 0,
+            "0=1倍，1=2倍，2=4倍，3=8倍。");
+        cycleHotkey = Config.Bind("设置", "切换热键", new KeyboardShortcut(KeyCode.F6),
+            "按下后依次切换 1倍、2倍、4倍、8倍。游戏暂停时不会解除暂停。");
+        autoWakeCat = Config.Bind("设置", "自动唤醒小猫", false,
+            "开启后，小猫开始偷懒时立即自动唤醒。可在左上角面板中切换。");
+        autoSprinkleBait = Config.Bind("设置", "自动投放窝料", false,
+            "开启后，连续投放现有窝料并叠加持续时间。优先消耗手动购买的窝料，再使用按原游戏规则恢复的免费窝料。");
+        autoCompleteMiniGame = Config.Bind("设置", "自动完成鱼群聚集", false,
+            "开启后，检测到鱼群聚集小游戏时自动完成。可在左上角面板中切换。");
+        autoCompleteNpcTasks = Config.Bind("设置", "自动完成伙伴任务", false,
+            "开启后，自动识别当前地图中出现的伙伴任务，并在材料齐全时自动提交。");
+        autoSellFullBasket = Config.Bind("设置", "鱼篓满时自动出售", false,
+            "开启后，鱼篓装满时自动按全选规则出售一次。锁定鱼、任务鱼、伙伴任务所需鱼与自动出售设置中保留的鱼不会出售。");
+        multiplierIndex.Value = Mathf.Clamp(multiplierIndex.Value, 0, Multipliers.Length - 1);
+        harmony = new Harmony("local.codex.fischer-time-flow");
+        harmony.PatchAll(typeof(FischerTimeFlowPlugin).Assembly);
+        Logger.LogInfo("Fischer 综合 Mod 已加载。按 F6 切换 1倍、2倍、4倍、8倍。");
+    }
+
+    private void Update()
+    {
+        if (cycleHotkey.Value.IsDown())
+        {
+            CycleMultiplier();
+        }
+
+        if (Time.timeScale > 0f)
+        {
+            Time.timeScale = CurrentMultiplier;
+        }
+    }
+
+    private void OnGUI()
+    {
+        EnsurePanelStyles();
+        if (panelHidden)
+        {
+            DrawCollapsedLauncher();
+            return;
+        }
+
+        bool canWakeCat = Game.curFishingState == FishingState.SlackingOff;
+        float panelHeight = canWakeCat ? 678f : 622f;
+        Rect panelRect = new Rect(18f, 18f, 452f, panelHeight);
+        DrawPanelFrame(panelRect);
+
+        GUI.Label(new Rect(42f, 40f, 250f, 28f), "菲舍的钓鱼助手", panelTitleStyle);
+        GUI.Label(new Rect(42f, 70f, 250f, 20f), "时间流速  ·  " + CurrentMultiplier + " 倍", panelSmallLabelStyle);
+        if (DrawActionButton(new Rect(382f, 52f, 64f, 30f), "隐藏", DisabledColor, new Color(0.57f, 0.38f, 0.28f, 1f)))
+        {
+            panelHidden = true;
+            return;
+        }
+
+        if (DrawActionButton(new Rect(42f, 116f, 404f, 38f), "切换时间倍率  (F6)", AccentColor, new Color(0.43f, 0.64f, 0.50f, 1f)))
+        {
+            CycleMultiplier();
+        }
+
+        autoWakeCat.Value = DrawToggleRow(new Rect(42f, 170f, 404f, 48f), autoWakeCat.Value, "自动唤醒小猫", "小猫偷懒时会立即回到钓鱼状态");
+        autoSprinkleBait.Value = DrawToggleRow(new Rect(42f, 224f, 404f, 48f), autoSprinkleBait.Value, "自动投放窝料", "连续使用可用窝料，并叠加打窝时间");
+        if (DrawActionButton(new Rect(42f, 280f, 404f, 38f), "整理神奇鱼缸", GoldColor, new Color(0.88f, 0.66f, 0.32f, 1f)))
+        {
+            OrganizeMagicTank();
+        }
+
+        autoCompleteMiniGame.Value = DrawToggleRow(new Rect(42f, 328f, 404f, 48f), autoCompleteMiniGame.Value, "自动完成鱼群聚集", "发现感叹号后自动开始并完成小游戏");
+        autoCompleteNpcTasks.Value = DrawToggleRow(new Rect(42f, 382f, 404f, 48f), autoCompleteNpcTasks.Value, "自动伙伴交互", "自动进行对话、接取并提交可完成任务");
+        autoSellFullBasket.Value = DrawToggleRow(new Rect(42f, 436f, 404f, 48f), autoSellFullBasket.Value, "鱼篓满时自动出售", "保留锁定鱼、任务鱼与设为保留的鱼");
+        DrawCatGoalProgress(new Rect(42f, 502f, 404f, 92f));
+
+        if (canWakeCat && DrawActionButton(new Rect(42f, 612f, 404f, 38f), "立即唤醒偷懒的小猫", AccentColor, new Color(0.43f, 0.64f, 0.50f, 1f)))
+        {
+            Game.startled = true;
+        }
+    }
+
+    private void DrawCollapsedLauncher()
+    {
+        Rect revealArea = new Rect(8f, 8f, 76f, 76f);
+        if (!revealArea.Contains(Event.current.mousePosition))
+        {
+            return;
+        }
+
+        Rect launcherRect = new Rect(22f, 22f, 42f, 42f);
+        DrawColorRect(new Rect(20f, 20f, 46f, 46f), PanelBorderColor);
+        DrawColorRect(launcherRect, HeaderColor);
+        GUI.Label(launcherRect, "鱼", panelButtonLabelStyle);
+        if (GUI.Button(launcherRect, GUIContent.none, GUIStyle.none))
+        {
+            panelHidden = false;
+        }
+    }
+
+    private void DrawPanelFrame(Rect panelRect)
+    {
+        DrawColorRect(panelRect, PanelBorderColor);
+        DrawColorRect(new Rect(panelRect.x + 3f, panelRect.y + 3f, panelRect.width - 6f, panelRect.height - 6f), PanelPaperColor);
+        DrawColorRect(new Rect(panelRect.x + 10f, panelRect.y + 10f, panelRect.width - 20f, 82f), HeaderColor);
+        DrawColorRect(new Rect(panelRect.x + 15f, panelRect.y + 100f, panelRect.width - 30f, 3f), GoldColor);
+    }
+
+    private bool DrawToggleRow(Rect rowRect, bool value, string title, string detail)
+    {
+        DrawColorRect(rowRect, RowBorderColor);
+        DrawColorRect(new Rect(rowRect.x + 1f, rowRect.y + 1f, rowRect.width - 2f, rowRect.height - 2f), RowColor);
+        GUI.Label(new Rect(rowRect.x + 12f, rowRect.y + 5f, 286f, 21f), title, panelLabelStyle);
+        GUI.Label(new Rect(rowRect.x + 12f, rowRect.y + 27f, 286f, 17f), detail, panelSmallLabelStyle);
+
+        Rect toggleRect = new Rect(rowRect.x + 318f, rowRect.y + 10f, 74f, 28f);
+        Color background = value ? AccentColor : DisabledColor;
+        if (toggleRect.Contains(Event.current.mousePosition))
+        {
+            background = value ? new Color(0.26f, 0.80f, 0.62f, 1f) : new Color(0.52f, 0.31f, 0.18f, 1f);
+        }
+
+        DrawColorRect(toggleRect, background);
+        GUI.Label(toggleRect, value ? "已开启" : "已关闭", panelButtonLabelStyle);
+        return GUI.Button(toggleRect, GUIContent.none, GUIStyle.none) ? !value : value;
+    }
+
+    private bool DrawActionButton(Rect rect, string label, Color color, Color hoverColor)
+    {
+        DrawColorRect(rect, rect.Contains(Event.current.mousePosition) ? hoverColor : color);
+        GUI.Label(rect, label, panelButtonLabelStyle);
+        return GUI.Button(rect, GUIContent.none, GUIStyle.none);
+    }
+
+    private void DrawCatGoalProgress(Rect rect)
+    {
+        long earned = Main.model?.backPackModel?.allGoldCoin ?? 0L;
+        long remaining = Math.Max(0L, CatGoalTarget - earned);
+        float progress = Mathf.Clamp01((float)((double)earned / CatGoalTarget));
+
+        GUI.Label(new Rect(rect.x, rect.y, 300f, 22f), "猫的小目标  ·  累计赚取一亿鱼币", panelLabelStyle);
+        GUI.Label(new Rect(rect.x + 318f, rect.y, 86f, 22f), (progress * 100f).ToString("F2") + "%", panelLabelStyle);
+        DrawColorRect(new Rect(rect.x, rect.y + 28f, rect.width, 20f), DisabledColor);
+        DrawColorRect(new Rect(rect.x + 3f, rect.y + 31f, (rect.width - 6f) * progress, 14f), GoldColor);
+
+        GUI.Label(new Rect(rect.x, rect.y + 57f, rect.width, 18f), earned.ToString("N0") + " / " + CatGoalTarget.ToString("N0"), panelSmallLabelStyle);
+        GUI.Label(new Rect(rect.x, rect.y + 76f, rect.width, 18f), "距离目标还差 " + remaining.ToString("N0") + " 鱼币", panelSmallLabelStyle);
+    }
+
+    private void EnsurePanelStyles()
+    {
+        if (panelTitleStyle != null)
+        {
+            return;
+        }
+
+        panelTitleStyle = new GUIStyle(GUI.skin.label)
+        {
+            alignment = TextAnchor.MiddleLeft,
+            fontSize = 20,
+            fontStyle = FontStyle.Bold,
+            normal = { textColor = new Color(1f, 0.95f, 0.82f, 1f) }
+        };
+        panelLabelStyle = new GUIStyle(GUI.skin.label)
+        {
+            alignment = TextAnchor.MiddleLeft,
+            fontSize = 16,
+            fontStyle = FontStyle.Bold,
+            normal = { textColor = PanelBorderColor }
+        };
+        panelSmallLabelStyle = new GUIStyle(GUI.skin.label)
+        {
+            alignment = TextAnchor.MiddleLeft,
+            fontSize = 12,
+            normal = { textColor = new Color(0.42f, 0.27f, 0.20f, 1f) }
+        };
+        panelCenteredLabelStyle = new GUIStyle(GUI.skin.label)
+        {
+            alignment = TextAnchor.MiddleCenter,
+            fontSize = 13,
+            fontStyle = FontStyle.Bold,
+            normal = { textColor = PanelBorderColor }
+        };
+        panelButtonLabelStyle = new GUIStyle(GUI.skin.label)
+        {
+            alignment = TextAnchor.MiddleCenter,
+            fontSize = 13,
+            fontStyle = FontStyle.Bold,
+            normal = { textColor = new Color(1f, 0.96f, 0.85f, 1f) }
+        };
+    }
+
+    private static void DrawColorRect(Rect rect, Color color)
+    {
+        Color originalColor = GUI.color;
+        GUI.color = color;
+        GUI.DrawTexture(rect, Texture2D.whiteTexture);
+        GUI.color = originalColor;
+    }
+
+    private void LateUpdate()
+    {
+        if (Time.timeScale <= 0f)
+        {
+            return;
+        }
+
+        SetCatAnimationSpeed();
+        SetTimelineAnimationSpeed();
+        UpdateAcceleratedShopRefresh();
+        SyncAutoPurchase();
+        WakeCatIfEnabled();
+        SprinkleBaitIfEnabled();
+        CompleteMiniGameIfEnabled();
+        CompleteNpcTasksIfEnabled();
+        ProcessNewBasketFish();
+        SellFullBasketIfEnabled();
+    }
+
+    private void CycleMultiplier()
+    {
+        multiplierIndex.Value = (multiplierIndex.Value + 1) % Multipliers.Length;
+        Logger.LogInfo("时间流速已切换为 " + CurrentMultiplier + "倍。");
+    }
+
+    private void SetUnscaledAnimatorSpeed(Animator animator)
+    {
+        if (animator != null && animator.updateMode == AnimatorUpdateMode.UnscaledTime)
+        {
+            animator.speed = CurrentMultiplier;
+        }
+    }
+
+    private void SetCatAnimationSpeed()
+    {
+        if (CatAnimatorCtrl.Instance == null)
+        {
+            return;
+        }
+
+        SetUnscaledAnimatorSpeed(CatAnimatorCtrl.Instance.anim);
+        SetUnscaledAnimatorSpeed(CatAnimatorCtrl.Instance.basket);
+    }
+
+    private void SetTimelineAnimationSpeed()
+    {
+        Game game = UnityEngine.Object.FindObjectOfType<Game>();
+        if (game == null)
+        {
+            return;
+        }
+
+        float timelineSpeed = 24f / Consts.Instance().LENGTH_OF_THE_DAY / CurrentMultiplier;
+        SetAnimatorSpeed(game.timeAnim, timelineSpeed);
+        SetAnimatorSpeed(game.campsiteAnim, timelineSpeed);
+        SetAnimatorSpeed(SpotAnimatorField?.GetValue(game) as Animator, timelineSpeed);
+
+        HUD hud = UnityEngine.Object.FindObjectOfType<HUD>();
+        if (hud != null && hud.clockAnim != null)
+        {
+            SetAnimatorSpeed(hud.clockAnim.GetComponentInChildren<Animator>(true), timelineSpeed);
+        }
+    }
+
+    private void UpdateAcceleratedShopRefresh()
+    {
+        if (Main.model == null)
+        {
+            return;
+        }
+
+        if (shopRefreshRemainingSeconds < 0f)
+        {
+            DateTime utcNow = DateTime.UtcNow;
+            shopRefreshRemainingSeconds = 3600f - utcNow.Minute * 60f - utcNow.Second;
+        }
+
+        shopRefreshRemainingSeconds -= Time.unscaledDeltaTime * CurrentMultiplier;
+        if (shopRefreshRemainingSeconds <= 0f)
+        {
+            while (shopRefreshRemainingSeconds <= 0f)
+            {
+                shopRefreshRemainingSeconds += 3600f;
+            }
+
+            Main.model.backPackModel.propShopStock.Clear();
+            Main.model.backPackModel.autoPurchasingSetting.CheckIfAutoPurchase();
+            Main.evtMgr.Send(Framework.EventType.OnRefreshPageShop);
+            Logger.LogInfo("商店已按当前倍率刷新，已执行自动采购。");
+        }
+
+        PageShop shop = UnityEngine.Object.FindObjectOfType<PageShop>();
+        if (shop != null && shop.refreshCountDown != null)
+        {
+            int remainingSeconds = Mathf.CeilToInt(shopRefreshRemainingSeconds);
+            int minutes = remainingSeconds / 60;
+            int seconds = remainingSeconds % 60;
+            shop.refreshCountDown.text = minutes.ToString("00") + ":" + seconds.ToString("00");
+        }
+    }
+
+    private void SyncAutoPurchase()
+    {
+        if (Main.model == null)
+        {
+            return;
+        }
+
+        Framework.AutoPurchasingSetting setting = Main.model.backPackModel.autoPurchasingSetting;
+        long currentRefreshTime = Main.model.backPackModel.lastShopRefreshTime;
+        if (currentRefreshTime == 0L || currentRefreshTime == observedShopRefreshTime)
+        {
+            return;
+        }
+
+        observedShopRefreshTime = currentRefreshTime;
+        if (setting.isOn)
+        {
+            setting.CheckIfAutoPurchase();
+            Logger.LogInfo("检测到商店刷新，已执行自动采购。");
+        }
+    }
+
+    private void WakeCatIfEnabled()
+    {
+        if (autoWakeCat.Value && Game.curFishingState == FishingState.SlackingOff)
+        {
+            Game.startled = true;
+        }
+    }
+
+    private void SprinkleBaitIfEnabled()
+    {
+        if (!autoSprinkleBait.Value || Main.model == null)
+        {
+            nextAutoBaitUseTime = 0f;
+            return;
+        }
+
+        int purchasedBait = Main.model.mapModel.curMapInfo.regionalSprinkleBait;
+        int freeBait = Main.model.playerModel.curRemainSprinkleBateNum;
+        if (purchasedBait <= 0 && freeBait <= 0)
+        {
+            return;
+        }
+
+        if (Time.unscaledTime < nextAutoBaitUseTime)
+        {
+            return;
+        }
+
+        Spot spot = UnityEngine.Object.FindObjectOfType<Spot>();
+        if (spot == null || StartSprinkMethod == null)
+        {
+            return;
+        }
+
+        try
+        {
+            nextAutoBaitUseTime = Time.unscaledTime + 0.25f;
+            StartSprinkMethod.Invoke(spot, null);
+            Logger.LogInfo("已自动投放一层窝料，持续时间已叠加。");
+        }
+        catch (TargetInvocationException exception)
+        {
+            Logger.LogWarning("自动投放窝料失败：" + exception.InnerException?.Message);
+        }
+    }
+
+    private void CompleteMiniGame()
+    {
+        MiniGame miniGame = UnityEngine.Object.FindObjectOfType<MiniGame>();
+        Game game = UnityEngine.Object.FindObjectOfType<Game>();
+        if (miniGame == null || game == null)
+        {
+            return;
+        }
+
+        List<Fg_fish>? fishList = MiniGameFishListField?.GetValue(game) as List<Fg_fish>;
+        if (fishList == null || fishList.Count == 0)
+        {
+            return;
+        }
+
+        Main.evtMgr.Send(Framework.EventType.OnAidFinish, new object[1] { new List<Fg_fish>(fishList) });
+        miniGame.OnClickClose();
+        Logger.LogInfo("已自动完成鱼群聚集小游戏。");
+    }
+
+    private void CompleteMiniGameIfEnabled()
+    {
+        if (!autoCompleteMiniGame.Value)
+        {
+            aidRequestPending = false;
+            return;
+        }
+
+        MiniGame miniGame = UnityEngine.Object.FindObjectOfType<MiniGame>();
+        if (miniGame != null)
+        {
+            aidRequestPending = false;
+            CompleteMiniGame();
+            return;
+        }
+
+        if (Main.model == null)
+        {
+            return;
+        }
+
+        MapInfo mapInfo = Main.model.mapModel.curMapInfo;
+        if (!mapInfo.minigameShow || mapInfo.minigameRemainTime <= 0)
+        {
+            aidRequestPending = false;
+            return;
+        }
+
+        if (aidRequestPending && Time.unscaledTime < nextAidRequestTime)
+        {
+            return;
+        }
+
+        aidRequestPending = true;
+        nextAidRequestTime = Time.unscaledTime + 1f;
+        Main.evtMgr.Send(Framework.EventType.OnAid);
+        Logger.LogInfo("检测到鱼群聚集感叹号，已自动进入小游戏。");
+    }
+
+    private void CompleteNpcTasksIfEnabled()
+    {
+        if (!autoCompleteNpcTasks.Value)
+        {
+            return;
+        }
+
+        CompleteNpcDialogs();
+        CompleteNpcTasks();
+    }
+
+    private void SellFullBasketIfEnabled()
+    {
+        if (!autoSellFullBasket.Value || Main.model == null)
+        {
+            return;
+        }
+
+        List<FishInfo> fishBasket = Main.model.backPackModel.fishBasket;
+        if (fishBasket.Count < Main.model.playerModel.basketCapacity)
+        {
+            fullBasketHandled = false;
+            return;
+        }
+
+        if (fullBasketHandled)
+        {
+            return;
+        }
+
+        fullBasketHandled = true;
+        int saleAmount = 0;
+        int soldCount = 0;
+        Framework.AutoSellingSetting setting = Main.model.backPackModel.autoSellingSetting;
+        for (int i = fishBasket.Count - 1; i >= 0; i--)
+        {
+            FishInfo fishInfo = fishBasket[i];
+            if (fishInfo.isLocked || fishInfo.isTaskItem || IsFishReservedForNpcTask(fishInfo) || (setting.applyingToSelectAll && setting.ShouldRetain(fishInfo)))
+            {
+                continue;
+            }
+
+            saleAmount += fishInfo.price;
+            fishBasket.RemoveAt(i);
+            soldCount++;
+        }
+
+        if (soldCount == 0)
+        {
+            Logger.LogInfo("鱼篓已满，但所有鱼均被保留规则保护，未出售。");
+            return;
+        }
+
+        Main.model.backPackModel.AddCoin(saleAmount);
+        Main.evtMgr.Send(Framework.EventType.OnFishCountChange);
+        Logger.LogInfo("鱼篓已满，已自动全选出售 " + soldCount + " 条鱼，获得 " + saleAmount + " 鱼币。");
+    }
+
+    private void CompleteNpcDialogs()
+    {
+        if (Main.model == null || Main.model.mapModel == null)
+        {
+            return;
+        }
+
+        foreach (NpcInfo npcInfo in Main.model.mapModel.curMapInfo.unlockNpc.Values)
+        {
+            if (!npcInfo.canDialog || npcInfo.isDialoging)
+            {
+                continue;
+            }
+
+            npcInfo.canDialog = false;
+            automaticDialogNpcs.Add(npcInfo);
+            Main.popMgr.OpenTip(Main.prefabPaths.DialogBox, new object[2] { npcInfo, Vector2.zero });
+            Logger.LogInfo("已打开伙伴普通对话。");
+            break;
+        }
+
+        DialogBox dialogBox = UnityEngine.Object.FindObjectOfType<DialogBox>();
+        NpcInfo? dialogNpc = dialogBox == null ? null : DialogBoxNpcInfoField?.GetValue(dialogBox) as NpcInfo;
+        if (dialogBox == null || dialogNpc == null || !automaticDialogNpcs.Contains(dialogNpc) || NextDialogMethod == null)
+        {
+            return;
+        }
+
+        try
+        {
+            NextDialogMethod.Invoke(dialogBox, null);
+            if (!dialogNpc.isDialoging)
+            {
+                automaticDialogNpcs.Remove(dialogNpc);
+                Logger.LogInfo("伙伴普通对话已完成。");
+            }
+        }
+        catch (TargetInvocationException exception)
+        {
+            automaticDialogNpcs.Remove(dialogNpc);
+            Logger.LogWarning("自动完成伙伴对话失败：" + exception.InnerException?.Message);
+        }
+    }
+
+    private void CompleteNpcTasks()
+    {
+        if (Main.model == null || Main.model.mapModel == null)
+        {
+            return;
+        }
+
+        int acceptedCount = 0;
+        int completedCount = 0;
+        foreach (NpcInfo npcInfo in Main.model.mapModel.curMapInfo.unlockNpc.Values)
+        {
+            Fg_task? taskCfg = GetCurrentNpcTask(npcInfo, out bool acceptedTask);
+            if (acceptedTask)
+            {
+                acceptedCount++;
+            }
+
+            if (taskCfg == null)
+            {
+                continue;
+            }
+
+            List<FishInfo> requiredFish = GetRequiredFish(taskCfg);
+            if (requiredFish.Count < taskCfg.require_number)
+            {
+                continue;
+            }
+
+            Main.evtMgr.Send(Framework.EventType.OnSubmitTask, new object[2] { taskCfg, true });
+            npcInfo.SubmitTask(taskCfg, requiredFish, satisfied: true);
+            npcInfo.canShowTask = false;
+            npcInfo.isDialoging = false;
+            completedCount++;
+        }
+
+        if (completedCount > 0)
+        {
+            Main.evtMgr.Send(Framework.EventType.OnFishCountChange);
+            DialogBoxChoice dialogBox = UnityEngine.Object.FindObjectOfType<DialogBoxChoice>();
+            if (dialogBox != null)
+            {
+                dialogBox.OnClickClose();
+            }
+        }
+
+        if (acceptedCount > 0 || completedCount > 0)
+        {
+            Logger.LogInfo("伙伴任务处理完成：接受 " + acceptedCount + " 个，完成 " + completedCount + " 个。");
+        }
+    }
+
+    private static Fg_task? GetCurrentNpcTask(NpcInfo npcInfo, out bool acceptedTask)
+    {
+        acceptedTask = false;
+        if (npcInfo.specialTask != 0 && npcInfo.specialDialog == 0)
+        {
+            return Main.config.Fg_task.GetValue(npcInfo.specialTask);
+        }
+
+        if (npcInfo.curDailyTask != 0)
+        {
+            return Main.config.Fg_task.GetValue(npcInfo.curDailyTask);
+        }
+
+        if (!npcInfo.canShowTask)
+        {
+            return null;
+        }
+
+        int taskId = npcInfo.RandomDailyTask();
+        Fg_task taskCfg = Main.config.Fg_task.GetValue(taskId);
+        if (taskCfg == null)
+        {
+            return null;
+        }
+
+        npcInfo.ReceivingDailyTask(taskId);
+        npcInfo.canShowTask = false;
+        acceptedTask = true;
+        return taskCfg;
+    }
+
+    private static List<FishInfo> GetRequiredFish(Fg_task taskCfg)
+    {
+        List<FishInfo> matchingFish = new List<FishInfo>();
+        List<FishInfo> fishBasket = Main.model.backPackModel.fishBasket;
+        for (int i = 0; i < fishBasket.Count; i++)
+        {
+            FishInfo fishInfo = fishBasket[i];
+            if (IsFishRequiredByTask(fishInfo, taskCfg))
+            {
+                matchingFish.Add(fishInfo);
+            }
+        }
+
+        matchingFish.Sort((left, right) => left.price.CompareTo(right.price));
+        if (matchingFish.Count > taskCfg.require_number)
+        {
+            matchingFish.RemoveRange(taskCfg.require_number, matchingFish.Count - taskCfg.require_number);
+        }
+
+        return matchingFish;
+    }
+
+    private static bool IsFishRequiredByTask(FishInfo fishInfo, Fg_task taskCfg)
+    {
+        if ((int)Common.Instance().GetFishScore(fishInfo) > taskCfg.require_quality || (taskCfg.require_glitter == 1 && fishInfo.fishVersion != FishVersion.Glitter))
+        {
+            return false;
+        }
+
+        for (int i = 0; i < taskCfg.requirements.Length; i++)
+        {
+            if (fishInfo.fishCfg.id == taskCfg.requirements[i])
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    [HarmonyPostfix]
+    [HarmonyPatch(typeof(Game), "PutFishIntoBasket", new Type[] { typeof(FishInfo) })]
+    private static void OnFishCaught(FishInfo fishInfo)
+    {
+        instance?.HandleFishCaught(fishInfo);
+    }
+
+    private void OrganizeMagicTank()
+    {
+        if (Main.model == null)
+        {
+            return;
+        }
+
+        List<FishInfo> candidates = new List<FishInfo>();
+        foreach (FishInfo fishInfo in Main.model.backPackModel.fishBasket)
+        {
+            if (!IsFishReservedForNpcTask(fishInfo))
+            {
+                candidates.Add(fishInfo);
+            }
+        }
+
+        List<FishTankInfo> normalTanks = Main.model.backPackModel.appreciateTanks;
+        for (int i = 0; i < normalTanks.Count; i++)
+        {
+            for (int j = 0; j < normalTanks[i].fishInfos.Count; j++)
+            {
+                FishInfo fishInfo = normalTanks[i].fishInfos[j];
+                if (!IsFishReservedForNpcTask(fishInfo))
+                {
+                    candidates.Add(fishInfo);
+                }
+            }
+        }
+
+        candidates.Sort((left, right) => right.tankIncome.CompareTo(left.tankIncome));
+        int movedCount = 0;
+        for (int i = 0; i < candidates.Count; i++)
+        {
+            List<FishInfo>? source = FindFishSource(candidates[i], out int sourceTankIndex);
+            if (source != null && TryMoveFishToMagicTank(candidates[i], source, sourceTankIndex))
+            {
+                movedCount++;
+            }
+        }
+
+        Logger.LogInfo("神奇鱼缸整理完成，检查了 " + candidates.Count + " 条鱼，移动或替换了 " + movedCount + " 条鱼。");
+    }
+
+    private static List<FishInfo>? FindFishSource(FishInfo fishInfo, out int tankIndex)
+    {
+        List<FishInfo> fishBasket = Main.model.backPackModel.fishBasket;
+        if (fishBasket.Contains(fishInfo))
+        {
+            tankIndex = -1;
+            return fishBasket;
+        }
+
+        List<FishTankInfo> normalTanks = Main.model.backPackModel.appreciateTanks;
+        for (int i = 0; i < normalTanks.Count; i++)
+        {
+            if (normalTanks[i].fishInfos.Contains(fishInfo))
+            {
+                tankIndex = i + 1;
+                return normalTanks[i].fishInfos;
+            }
+        }
+
+        tankIndex = -1;
+        return null;
+    }
+
+    private void ProcessNewBasketFish()
+    {
+        if (Main.model == null)
+        {
+            return;
+        }
+
+        List<FishInfo> fishBasket = Main.model.backPackModel.fishBasket;
+        if (!basketBaselineReady)
+        {
+            for (int i = 0; i < fishBasket.Count; i++)
+            {
+                knownBasketFish.Add(fishBasket[i]);
+            }
+
+            basketBaselineReady = true;
+            return;
+        }
+
+        for (int i = 0; i < fishBasket.Count; i++)
+        {
+            FishInfo fishInfo = fishBasket[i];
+            if (knownBasketFish.Add(fishInfo))
+            {
+                HandleFishCaught(fishInfo);
+                break;
+            }
+        }
+    }
+
+    private void HandleFishCaught(FishInfo fishInfo)
+    {
+        knownBasketFish.Add(fishInfo);
+        if (IsFishReservedForNpcTask(fishInfo))
+        {
+            Main.model.mapModel.curMapInfo.CheckNpcTask();
+            Logger.LogInfo("新钓鱼符合伙伴任务，已保留在鱼篓并刷新提交提示。");
+            return;
+        }
+
+        OrganizeMagicTank();
+    }
+
+    private static bool IsFishReservedForNpcTask(FishInfo fishInfo)
+    {
+        if (Main.model == null || Main.model.mapModel == null)
+        {
+            return false;
+        }
+
+        foreach (NpcInfo npcInfo in Main.model.mapModel.curMapInfo.unlockNpc.Values)
+        {
+            Fg_task? taskCfg = null;
+            if (npcInfo.specialTask != 0 && npcInfo.specialDialog == 0)
+            {
+                taskCfg = Main.config.Fg_task.GetValue(npcInfo.specialTask);
+            }
+            else if (npcInfo.curDailyTask != 0)
+            {
+                taskCfg = Main.config.Fg_task.GetValue(npcInfo.curDailyTask);
+            }
+
+            if (taskCfg != null && IsFishRequiredByTask(fishInfo, taskCfg))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private bool TryMoveFishToMagicTank(FishInfo caughtFish, List<FishInfo> source, int sourceTankIndex)
+    {
+        if (caughtFish.isTrash || caughtFish.isTaskItem || caughtFish.isDecorItem || Main.model == null)
+        {
+            return false;
+        }
+
+        List<FishInfo> magicTank = Main.model.backPackModel.incomeTank.fishInfos;
+        if (!source.Contains(caughtFish))
+        {
+            return false;
+        }
+
+        int tankCapacity = Main.model.playerModel.tankCfg.value;
+        if (magicTank.Count < tankCapacity)
+        {
+            source.Remove(caughtFish);
+            Main.evtMgr.Send(Framework.EventType.OnRemoveFishInTank, new object[2] { caughtFish, sourceTankIndex });
+            magicTank.Add(caughtFish);
+            NotifyFishTankChanged(caughtFish, 0);
+            Logger.LogInfo("已将新钓鱼放入神奇鱼缸。");
+            return true;
+        }
+
+        FishInfo lowestIncomeFish = magicTank[0];
+        for (int i = 1; i < magicTank.Count; i++)
+        {
+            if (magicTank[i].tankIncome < lowestIncomeFish.tankIncome)
+            {
+                lowestIncomeFish = magicTank[i];
+            }
+        }
+
+        if (caughtFish.tankIncome <= lowestIncomeFish.tankIncome)
+        {
+            return false;
+        }
+
+        source.Remove(caughtFish);
+        Main.evtMgr.Send(Framework.EventType.OnRemoveFishInTank, new object[2] { caughtFish, sourceTankIndex });
+        magicTank.Remove(lowestIncomeFish);
+        magicTank.Add(caughtFish);
+        Main.evtMgr.Send(Framework.EventType.OnRemoveFishInTank, new object[2] { lowestIncomeFish, 0 });
+        Main.model.backPackModel.fishBasket.Add(lowestIncomeFish);
+        NotifyFishTankChanged(caughtFish, 0);
+        Logger.LogInfo("已用收益更高的新鱼替换神奇鱼缸中的最低收益鱼。");
+        return true;
+    }
+
+    private static void NotifyFishTankChanged(FishInfo fishInfo, int tankIndex)
+    {
+        Main.evtMgr.Send(Framework.EventType.OnFishCountChange);
+        Main.evtMgr.Send(Framework.EventType.OnPutFishIntoTank, new object[2] { fishInfo, tankIndex });
+        Main.evtMgr.Send(Framework.EventType.OnHourlyEarningsChange);
+    }
+
+    private static void SetAnimatorSpeed(Animator? animator, float speed)
+    {
+        if (animator != null)
+        {
+            animator.speed = speed;
+        }
+    }
+
+    private float CurrentMultiplier => Multipliers[Mathf.Clamp(multiplierIndex.Value, 0, Multipliers.Length - 1)];
+
+    private void OnDestroy()
+    {
+        harmony?.UnpatchSelf();
+        instance = null;
+        Time.timeScale = 1f;
+    }
+}
