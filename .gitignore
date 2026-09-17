@@ -3,3 +3,37 @@ obj/
 .vs/
 *.user
 *.suo
+
+# 凭据与密钥——绝不入库
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.snk
+secrets.json
+appsettings.*.json
+appsettings.Development.json
+credentials.json
+id_rsa
+id_ed25519
+.npmrc
+.netrc
+.git-credentials
+
+# 扫描报告产物：报告本身含敏感位置清单，属于隐私文件
+report.json
+report.md
+*-privacy-scan/
+
+# 游戏与 mod 运行时目录（含本机路径与用户配置）
+BepInEx/
+doorstop_config.ini
+winhttp.dll
+*.log
+Thumbs.db
+.DS_Store
+desktop.ini
+
