@@ -1,5 +1,8 @@
 # Fischer Comprehensive Mod
 
+![License](https://img.shields.io/badge/license-MIT-blue.svg)
+![Release](https://img.shields.io/github/v/release/skdfndh/FischerComprehensiveMod)
+
 《Fischer's Fishing Journey》（《猫猫钓游记》）的 BepInEx 5 综合模组。它为单人离线游玩提供时间倍率、日常操作自动化和成就进度查看功能。
 
 > 本项目为非官方模组，与游戏开发商及发行平台无关联。使用前请自行备份存档，并确认符合你所在平台和游戏的使用规则。
@@ -66,7 +69,7 @@ Loading [Fischer 综合 Mod]
 需要安装 .NET SDK，并准备好已安装 BepInEx 5 的游戏目录。
 
 ```powershell
-git clone <仓库地址>
+git clone https://github.com/skdfndh/FischerComprehensiveMod.git
 cd FischerComprehensiveMod
 dotnet build .\FischerTimeFlow.csproj --configuration Release "-p:GameDir=游戏根目录"
 ```
@@ -76,6 +79,8 @@ dotnet build .\FischerTimeFlow.csproj --configuration Release "-p:GameDir=游戏
 ```text
 bin\Release\net472\FischerTimeFlow.dll
 ```
+
+构建本身即是验证：`GameDir` 指向的 BepInEx 程序集必须与代码中引用的接口一致，接口变更会在编译期直接失败，而不是等到运行时才报错。
 
 ## 一键同步到游戏
 
@@ -97,3 +102,9 @@ bin\Release\net472\FischerTimeFlow.dll
 - 启动后报错：确认使用的是 Mono 版 BepInEx 5，并确认游戏更新后程序集接口没有变化。
 - 同步脚本拒绝执行：请完全退出游戏和启动器后再运行脚本。
 - 功能异常：关闭相应自动开关，备份存档，并附上 `BepInEx\LogOutput.log` 中与本模组相关的日志提交 Issue。
+
+## 许可证
+
+[MIT](LICENSE) © 2026 kddsk
+
+本模组为非官方作品，与《Fischer's Fishing Journey》的开发商及发行平台无关联，不包含也不分发游戏本体的任何代码或资源。运行时依赖的 [BepInEx 5](https://github.com/BepInEx/BepInEx)（LGPL-2.1）与 Harmony（MIT）由用户自行安装，未随本仓库分发。
